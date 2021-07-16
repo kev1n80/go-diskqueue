@@ -463,8 +463,6 @@ func (d *diskQueue) readNumOfMessages(fileName string) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-
-		d.reader = bufio.NewReader(d.readFile)
 	}
 
 	closeReadFile := func() {
@@ -480,7 +478,7 @@ func (d *diskQueue) readNumOfMessages(fileName string) (int64, error) {
 	}
 
 	var totalMessages int64
-	err = binary.Read(d.reader, binary.BigEndian, &totalMessages)
+	err = binary.Read(d.readFile, binary.BigEndian, &totalMessages)
 	if err != nil {
 		return 0, err
 	}
