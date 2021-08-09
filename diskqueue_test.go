@@ -18,6 +18,10 @@ import (
 	"time"
 )
 
+const (
+	largeTimePeriod = time.Hour * 1000
+)
+
 func Equal(t *testing.T, expected, actual interface{}) {
 	if !reflect.DeepEqual(expected, actual) {
 		_, file, line, _ := runtime.Caller(1)
@@ -363,7 +367,7 @@ func TestDiskQueueSyncAfterReadWithDiskSizeImplementation(t *testing.T) {
 		panic(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	dq := NewWithDiskSpace(dqName, tmpDir, 6040, 1<<11, 0, 1<<10, 2500, 50*time.Millisecond, l)
+	dq := NewWithDiskSpace(dqName, tmpDir, 6040, largeTimePeriod, 1<<11, 0, 1<<10, 2500, 50*time.Millisecond, l)
 	defer dq.Close()
 
 	msgSize := 1000
@@ -557,7 +561,7 @@ func TestDiskSizeImplementationDiskSizeLimit(t *testing.T) {
 		panic(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	dq := NewWithDiskSpace(dqName, tmpDir, 6040, 1<<11, 0, 1<<10, 2500, 50*time.Millisecond, l)
+	dq := NewWithDiskSpace(dqName, tmpDir, 6040, largeTimePeriod, 1<<11, 0, 1<<10, 2500, 50*time.Millisecond, l)
 	defer dq.Close()
 
 	msgSize := 1000
@@ -633,6 +637,104 @@ surpassDiskSizeLimit:
 done:
 }
 
+func TestDiskSizeRetentionTimeZero(t *testing.T) {
+	l := NewTestLogger(t)
+	dqName := "test_disk_queue_retention_time_zero" + strconv.Itoa(int(time.Now().Unix()))
+	tmpDir, err := ioutil.TempDir("", fmt.Sprintf("nsq-test-%d", time.Now().UnixNano()))
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	msgSize := 100
+	numMsg := 3
+	maxBytesPerFile := int64(msgSize + 4 + numFileMsgBytes)
+	maxBytesDiskSpace := int64(maxBytesPerFile*int64(numMsg) + maxMetaDataFileSize)
+	dq := NewWithDiskSpace(dqName, tmpDir, maxBytesDiskSpace, largeTimePeriod, maxBytesPerFile, 0, int32(msgSize), 1, 50*time.Millisecond, l)
+	defer dq.Close()
+
+	msg := make([]byte, msgSize)
+
+	for i := 0; i < numMsg; i++ {
+		dq.Put(msg)
+	}
+	if dq.Depth() != int64(numMsg) {
+		panic("fail.")
+	}
+	dq.setRetentionTime(time.Second * 0)
+	dq.Put(msg)
+	if dq.Depth() != 0 {
+		panic("fail.")
+	}
+}
+
+func TestDiskSizeRetentionTimeWithMultipleFiles(t *testing.T) {
+	l := NewTestLogger(t)
+	dqName := "test_disk_queue_retention_time_with_multiple_files" + strconv.Itoa(int(time.Now().Unix()))
+	tmpDir, err := ioutil.TempDir("", fmt.Sprintf("nsq-test-%d", time.Now().UnixNano()))
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	msgSize := 100
+	numMsg := 3
+	maxBytesPerFile := int64(msgSize + 4 + numFileMsgBytes)
+	maxBytesDiskSpace := int64(maxBytesPerFile*int64(numMsg) + maxMetaDataFileSize)
+	dq := NewWithDiskSpace(dqName, tmpDir, maxBytesDiskSpace, largeTimePeriod, maxBytesPerFile, 0, int32(msgSize), 1, 50*time.Millisecond, l)
+	defer dq.Close()
+
+	msg := make([]byte, msgSize)
+	for i := 0; i < numMsg; i++ {
+		dq.Put(msg)
+		time.Sleep(time.Millisecond * 50)
+	}
+
+	t1, err := dq.getCreateTime(1)
+	if err != nil {
+		panic("failed")
+	}
+	retentionTime := time.Since(t1.Add(time.Microsecond * 1))
+	dq.setRetentionTime(retentionTime)
+
+	dq.Put(msg)
+	if dq.Depth() != 2 {
+		panic("fail.")
+	}
+}
+
+func TestDiskSizeRetentionTimeWithSingleFile(t *testing.T) {
+	l := NewTestLogger(t)
+	dqName := "test_disk_queue_retention_time_with_single_file" + strconv.Itoa(int(time.Now().Unix()))
+	tmpDir, err := ioutil.TempDir("", fmt.Sprintf("nsq-test-%d", time.Now().UnixNano()))
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	msgSize := 100
+	numMsg := 3
+	maxBytesPerFile := int64((msgSize+4)*numMsg + numFileMsgBytes)
+	maxBytesDiskSpace := int64(maxBytesPerFile+maxMetaDataFileSize) + 1
+	dq := NewWithDiskSpace(dqName, tmpDir, maxBytesDiskSpace, largeTimePeriod, maxBytesPerFile, 0, int32(msgSize), 1, 50*time.Millisecond, l)
+	defer dq.Close()
+
+	msg := make([]byte, msgSize)
+	for i := 0; i < numMsg; i++ {
+		dq.Put(msg)
+		time.Sleep(time.Millisecond * 50)
+	}
+	if err != nil {
+		panic("failed")
+	}
+	dq.setRetentionTime(largeTimePeriod)
+
+	dq.Put(msg)
+	if dq.Depth() != 1 {
+		panic("fail.")
+	}
+}
+
 func TestDiskSizeImplementationMsgSizeGreaterThanFileSize(t *testing.T) {
 	// write three files
 
@@ -643,7 +745,7 @@ func TestDiskSizeImplementationMsgSizeGreaterThanFileSize(t *testing.T) {
 		panic(err)
 	}
 	defer os.RemoveAll(tmpDir)
-	dq := NewWithDiskSpace(dqName, tmpDir, 1<<12, 1<<10, 0, 1<<12, 2500, 50*time.Millisecond, l)
+	dq := NewWithDiskSpace(dqName, tmpDir, 1<<12, largeTimePeriod, 1<<10, 0, 1<<12, 2500, 50*time.Millisecond, l)
 	defer dq.Close()
 
 	msgSize := 1000
@@ -767,7 +869,7 @@ func TestDiskSizeImplementationWithBadFiles(t *testing.T) {
 		panic("fail")
 	}
 
-	dq := NewWithDiskSpace(dqName, tmpDir, 1<<12, 1<<10, 10, 1600, 2500, 50*time.Millisecond, l)
+	dq := NewWithDiskSpace(dqName, tmpDir, 1<<12, largeTimePeriod, 1<<10, 10, 1600, 2500, 50*time.Millisecond, l)
 	defer dq.Close()
 
 	msgSize := 1000

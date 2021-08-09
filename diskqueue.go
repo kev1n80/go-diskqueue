@@ -13,6 +13,7 @@ import (
 	"path"
 	"regexp"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -58,6 +59,8 @@ type Interface interface {
 	Depth() int64
 	Empty() error
 	TotalBytesFolderSize() int64
+	setRetentionTime(time.Duration)         // this is used for testing only
+	getCreateTime(int64) (time.Time, error) // this is used for testing only
 }
 
 // diskQueue implements a filesystem backed FIFO queue
@@ -80,6 +83,7 @@ type diskQueue struct {
 	name                string
 	dataPath            string
 	maxBytesDiskSpace   int64
+	retentionTime       time.Duration
 	maxBytesPerFile     int64 // cannot change once created
 	maxBytesPerFileRead int64
 	minMsgSize          int32
@@ -124,7 +128,7 @@ func New(name string, dataPath string, maxBytesPerFile int64,
 	syncEvery int64, syncTimeout time.Duration, logf AppLogFunc) Interface {
 
 	return NewWithDiskSpace(name, dataPath,
-		0, maxBytesPerFile,
+		0, time.Second*0, maxBytesPerFile,
 		minMsgSize, maxMsgSize,
 		syncEvery, syncTimeout, logf)
 }
@@ -133,7 +137,7 @@ func New(name string, dataPath string, maxBytesPerFile int64,
 // If user is not using Disk Space Limit feature, maxBytesDiskSpace will
 // be 0
 func NewWithDiskSpace(name string, dataPath string,
-	maxBytesDiskSpace int64, maxBytesPerFile int64,
+	maxBytesDiskSpace int64, retentionTime time.Duration, maxBytesPerFile int64,
 	minMsgSize int32, maxMsgSize int32,
 	syncEvery int64, syncTimeout time.Duration, logf AppLogFunc) Interface {
 	enableDiskLimitation := true
@@ -144,6 +148,7 @@ func NewWithDiskSpace(name string, dataPath string,
 		name:                 name,
 		dataPath:             dataPath,
 		maxBytesDiskSpace:    maxBytesDiskSpace,
+		retentionTime:        retentionTime,
 		maxBytesPerFile:      maxBytesPerFile,
 		minMsgSize:           minMsgSize,
 		maxMsgSize:           maxMsgSize,
@@ -347,6 +352,16 @@ func (d *diskQueue) skipToNextRWFile() error {
 	}
 
 	return err
+}
+
+func (d *diskQueue) getCreateTime(readFileNum int64) (time.Time, error) {
+	info, err := os.Stat(d.fileName(readFileNum))
+	if err != nil {
+		return time.Now(), err
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	createTime := time.Unix(int64(stat.Ctim.Sec), int64(stat.Ctim.Nsec))
+	return createTime, nil
 }
 
 // readOne performs a low level filesystem read for a single []byte
@@ -586,7 +601,14 @@ func (d *diskQueue) freeDiskSpace(expectedBytesIncrease int64) error {
 		d.removeBadFile(badFileInfo)
 	}
 	for d.readFileNum <= d.writeFileNum {
-		if d.totalDiskSpaceUsed+expectedBytesIncrease <= d.maxBytesDiskSpace {
+		outdated := false
+		createTime, err := d.getCreateTime(d.readFileNum)
+		if err == nil {
+			if time.Since(createTime) > d.retentionTime {
+				outdated = true
+			}
+		}
+		if d.totalDiskSpaceUsed+expectedBytesIncrease <= d.maxBytesDiskSpace && !outdated {
 			return nil
 		}
 		// delete the read file (make space)
@@ -973,6 +995,11 @@ func (d *diskQueue) handleReadError() {
 	d.needSync = true
 
 	d.checkTailCorruption(d.depth)
+}
+
+// This is only used for testing.
+func (d *diskQueue) setRetentionTime(time time.Duration) {
+	d.retentionTime = time
 }
 
 // ioLoop provides the backend for exposing a go channel (via ReadChan())
