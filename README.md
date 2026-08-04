@@ -1,4 +1,4 @@
-# go-diskqueue
+# go-diskqueue with disk space limit
 
 This is a fork of https://github.com/nsqio/go-diskqueue with the additional support of total disk space limit.
 
